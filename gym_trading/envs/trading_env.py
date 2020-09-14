@@ -28,28 +28,30 @@ def _prices2returns(prices):
   return R
 
 class QuandlEnvSrc(object):
-  ''' 
+  '''
   Quandl-based implementation of a TradingEnv's data source.
-  
-  Pulls data from Quandl, preps for use by TradingEnv and then 
+
+  Pulls data from Quandl, preps for use by TradingEnv and then
   acts as data provider for each new episode.
   '''
 
-  MinPercentileDays = 100 
+  MinPercentileDays = 100
   QuandlAuthToken = ""  # not necessary, but can be used if desired
   Name = "TSE/9994" # https://www.quandl.com/search (use 'Free' filter)
 
-  def __init__(self, days=252, name=Name, auth=QuandlAuthToken, scale=True ):
+  def __init__(self, days=252, name=Name, auth=QuandlAuthToken, scale=False, df=None):
     self.name = name
     self.auth = auth
     self.days = days+1
-    log.info('getting data for %s from quandl...',QuandlEnvSrc.Name)
-    df = quandl.get(self.name) if self.auth=='' else quandl.get(self.name, authtoken=self.auth)
-    log.info('got data for %s from quandl...',QuandlEnvSrc.Name)
-    
+
+    if df is None:
+      log.info('getting data for %s from quandl...',QuandlEnvSrc.Name)
+      df = quandl.get(self.name) if self.auth=='' else quandl.get(self.name, authtoken=self.auth)
+      log.info('got data for %s from quandl...',QuandlEnvSrc.Name)
+
     df = df[ ~np.isnan(df.Volume)][['Close','Volume']]
     # we calculate returns and percentiles, then kill nans
-    df = df[['Close','Volume']]   
+    df = df[['Close','Volume']]
     df.Volume.replace(0,1,inplace=True) # days shouldn't have zero volume..
     df['Return'] = (df.Close-df.Close.shift())/df.Close.shift()
     pctrank = lambda x: pd.Series(x).rank(pct=True).iloc[-1]
@@ -66,13 +68,13 @@ class QuandlEnvSrc(object):
     self.max_values = df.max(axis=0)
     self.data = df
     self.step = 0
-    
+
   def reset(self):
     # we want contiguous data
     self.idx = np.random.randint( low = 0, high=len(self.data.index)-self.days )
     self.step = 0
 
-  def _step(self):    
+  def _step(self):
     obs = self.data.iloc[self.idx].as_matrix()
     self.idx += 1
     self.step += 1
@@ -97,7 +99,7 @@ class TradingSim(object) :
     self.costs            = np.zeros(self.steps)
     self.trades           = np.zeros(self.steps)
     self.mkt_retrns       = np.zeros(self.steps)
-    
+
   def reset(self):
     self.step = 0
     self.actions.fill(0)
@@ -108,7 +110,7 @@ class TradingSim(object) :
     self.costs.fill(0)
     self.trades.fill(0)
     self.mkt_retrns.fill(0)
-    
+
   def _step(self, action, retrn ):
     """ Given an action and return for prior period, calculates costs, navs,
         etc and returns the reward and a  summary of the day's activity. """
@@ -119,11 +121,11 @@ class TradingSim(object) :
 
     self.mkt_retrns[self.step] = retrn
     self.actions[self.step] = action
-    
-    self.posns[self.step] = action - 1     
+
+    self.posns[self.step] = action - 1
     self.trades[self.step] = self.posns[self.step] - bod_posn
-    
-    trade_costs_pct = abs(self.trades[self.step]) * self.trading_cost_bps 
+
+    trade_costs_pct = abs(self.trades[self.step]) * self.trading_cost_bps
     self.costs[self.step] = trade_costs_pct +  self.time_cost_bps
     reward = ( (bod_posn * retrn) - self.costs[self.step] )
     self.strat_retrns[self.step] = reward
@@ -131,10 +133,10 @@ class TradingSim(object) :
     if self.step != 0 :
       self.navs[self.step] =  bod_nav * (1 + self.strat_retrns[self.step-1])
       self.mkt_nav[self.step] =  mkt_nav * (1 + self.mkt_retrns[self.step-1])
-    
+
     info = { 'reward': reward, 'nav':self.navs[self.step], 'costs':self.costs[self.step] }
 
-    self.step += 1      
+    self.step += 1
     return reward, info
 
   def to_df(self):
@@ -145,7 +147,7 @@ class TradingSim(object) :
     #pdb.set_trace()
     df = pd.DataFrame( {'action':     self.actions, # today's action (from agent)
                           'bod_nav':    self.navs,    # BOD Net Asset Value (NAV)
-                          'mkt_nav':  self.mkt_nav, 
+                          'mkt_nav':  self.mkt_nav,
                           'mkt_return': self.mkt_retrns,
                           'sim_return': self.strat_retrns,
                           'position':   self.posns,   # EOD position
@@ -182,9 +184,9 @@ class TradingEnv(gym.Env):
   """
   metadata = {'render.modes': ['human']}
 
-  def __init__(self):
+  def __init__(self, df=None):
     self.days = 252
-    self.src = QuandlEnvSrc(days=self.days)
+    self.src = QuandlEnvSrc(days=self.days, df=df)
     self.sim = TradingSim(steps=self.days, trading_cost_bps=1e-3,
                           time_cost_bps=1e-4)
     self.action_space = spaces.Discrete( 3 )
@@ -206,22 +208,22 @@ class TradingEnv(gym.Env):
     yret = observation[2]
 
     reward, info = self.sim._step( action, yret )
-      
+
     #info = { 'pnl': daypnl, 'nav':self.nav, 'costs':costs }
 
     return observation, reward, done, info
-  
+
   def _reset(self):
     self.src.reset()
     self.sim.reset()
     return self.src._step()[0]
-    
+
   def _render(self, mode='human', close=False):
     #... TODO
     pass
 
   # some convenience functions:
-  
+
   def run_strat(self,  strategy, return_df=True):
     """run provided strategy, returns dataframe with all steps"""
     observation = self.reset()
@@ -231,12 +233,12 @@ class TradingEnv(gym.Env):
       observation, reward, done, info = self.step(action)
 
     return self.sim.to_df() if return_df else None
-      
+
   def run_strats( self, strategy, episodes=1, write_log=True, return_df=True):
     """ run provided strategy the specified # of times, possibly
         writing a log and possibly returning a dataframe summarizing activity.
-    
-        Note that writing the log is expensive and returning the df is moreso.  
+
+        Note that writing the log is expensive and returning the df is moreso.
         For training purposes, you might not want to set both.
     """
     logfile = None
@@ -246,12 +248,12 @@ class TradingEnv(gym.Env):
       need_df = write_log or return_df
 
     alldf = None
-        
+
     for i in range(episodes):
       df = self.run_strat(strategy, return_df=need_df)
       if write_log:
         df.to_csv(logfile, mode='a')
         if return_df:
           alldf = df if alldf is None else pd.concat([alldf,df], axis=0)
-            
+
     return alldf
